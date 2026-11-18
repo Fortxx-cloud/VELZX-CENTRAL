@@ -8,7 +8,7 @@
     "test": "tests"
   },
   "scripts": {
-    "test": "node --test tests/security/*.test.mjs",
+    "test": "node --test tests/security/*.test.mjs tests/unit/*.test.mjs",
     "start": "node index.js",
     "test:integration": "node --test tests/integration/*.test.mjs"
   },
