@@ -89,7 +89,23 @@ function readRawBody(req) {
 export function createCentralServer({
   pool,
   env = process.env,
+  oauthRouteHandler = null,
+  authRouteHandler = null,
 }) {
+  if (
+    oauthRouteHandler !== null
+    && typeof oauthRouteHandler !== 'function'
+  ) {
+    throw new TypeError('OAuth route handler tidak valid');
+  }
+
+  if (
+    authRouteHandler !== null
+    && typeof authRouteHandler !== 'function'
+  ) {
+    throw new TypeError('Auth route handler tidak valid');
+  }
+
   const verifyIngress = createIngressVerifier({ pool, env });
 
   return createServer(async (req, res) => {
@@ -180,8 +196,43 @@ export function createCentralServer({
       return;
     }
 
-    // Belum ada API route pada tahap ini.
-    // Route API berikutnya wajib ditempatkan setelah verifikasi ini.
+    // OAuth routes hanya boleh dipanggil setelah ingress terverifikasi.
+    if (oauthRouteHandler) {
+      let handled;
+
+      try {
+        handled = await oauthRouteHandler(req, res, {
+          clientIp: verification.clientIp,
+        });
+      } catch {
+        sendJson(res, 500, {
+          status: 'error',
+          message: 'Internal server error',
+        });
+        return;
+      }
+
+      if (handled === true) return;
+    }
+
+    if (authRouteHandler) {
+      let handled;
+
+      try {
+        handled = await authRouteHandler(req, res, {
+          clientIp: verification.clientIp,
+        });
+      } catch {
+        sendJson(res, 500, {
+          status: 'error',
+          message: 'Internal server error',
+        });
+        return;
+      }
+
+      if (handled === true) return;
+    }
+
     sendJson(res, 404, {
       status: 'error',
       message: 'Not found',

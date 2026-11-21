@@ -38,6 +38,8 @@ async function withServer(callback, options = {}) {
     env: {
       CENTRAL_INGRESS_SECRET: secret,
     },
+    oauthRouteHandler: options.oauthRouteHandler ?? null,
+    authRouteHandler: options.authRouteHandler ?? null,
   });
 
   await new Promise((resolve) => {
@@ -195,4 +197,104 @@ test('missing ingress secret prevents server creation', () => {
     }),
     /CENTRAL_INGRESS_SECRET/,
   );
+});
+
+
+test('OAuth route handler hanya dipanggil setelah ingress valid', async () => {
+  let handlerCalled = false;
+
+  await withServer(async (origin) => {
+    const response = await fetch(
+      `${origin}/auth/oauth/google/start`,
+    );
+
+    assert.equal(response.status, 401);
+    assert.equal(handlerCalled, false);
+  }, {
+    oauthRouteHandler: async () => {
+      handlerCalled = true;
+      return true;
+    },
+  });
+});
+
+test('OAuth route menerima client IP hasil ingress verifier', async () => {
+  let receivedClientIp = null;
+
+  await withServer(async (origin) => {
+    const signed = signedHeaders({
+      method: 'GET',
+      path: '/auth/oauth/google/start',
+      body: Buffer.alloc(0),
+    });
+
+    const headers = {
+      ...signed.headers,
+      'X-Forwarded-For': '198.51.100.77',
+    };
+
+    const response = await fetch(
+      `${origin}/auth/oauth/google/start`,
+      { headers },
+    );
+
+    assert.equal(response.status, 204);
+    assert.equal(receivedClientIp, '203.0.113.10');
+  }, {
+    oauthRouteHandler: async (req, res, context) => {
+      receivedClientIp = context.clientIp;
+      res.writeHead(204);
+      res.end();
+      return true;
+    },
+  });
+});
+
+
+test('Auth route handler tidak dipanggil sebelum ingress valid', async () => {
+  let handlerCalled = false;
+
+  await withServer(async (origin) => {
+    const response = await fetch(
+      origin + '/api/v1/me',
+    );
+
+    assert.equal(response.status, 401);
+    assert.equal(handlerCalled, false);
+  }, {
+    authRouteHandler: async () => {
+      handlerCalled = true;
+      return true;
+    },
+  });
+});
+
+test('Auth route handler dipanggil setelah ingress valid', async () => {
+  let handlerCalled = false;
+  let receivedClientIp = null;
+
+  await withServer(async (origin) => {
+    const signed = signedHeaders({
+      method: 'GET',
+      path: '/api/v1/me',
+      body: Buffer.alloc(0),
+    });
+
+    const response = await fetch(
+      origin + '/api/v1/me',
+      { headers: signed.headers },
+    );
+
+    assert.equal(response.status, 204);
+    assert.equal(handlerCalled, true);
+    assert.equal(receivedClientIp, '203.0.113.10');
+  }, {
+    authRouteHandler: async (req, res, context) => {
+      handlerCalled = true;
+      receivedClientIp = context.clientIp;
+      res.writeHead(204);
+      res.end();
+      return true;
+    },
+  });
 });

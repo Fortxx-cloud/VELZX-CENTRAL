@@ -16,6 +16,7 @@ function parseDatabaseUrl(value) {
 
     return {
       host: url.hostname.toLowerCase(),
+      port: url.port || '5432',
       database: decodeURIComponent(url.pathname.replace(/^\/+/, '')),
       user: decodeURIComponent(url.username),
     };
@@ -36,15 +37,18 @@ function readEnvValue(key) {
 }
 
 function sameDatabase(a, b) {
-  return a.host === b.host &&
-    a.database === b.database &&
-    a.user === b.user;
+  const normalizeHost = (host) =>
+    host.toLowerCase().replace(/-pooler(?=\.|$)/, '');
+
+  return normalizeHost(a.host) === normalizeHost(b.host) &&
+    a.port === b.port &&
+    a.database === b.database;
 }
 
 test('10 concurrent registrations enforce the permanent IP limit of 3', {
   timeout: 60000,
 }, async () => {
-  const connectionString = process.env.TEST_DATABASE_URL;
+  const connectionString = readEnvValue('TEST_DATABASE_URL');
 
   assert.ok(connectionString, 'TEST_DATABASE_URL belum diisi');
 
@@ -124,7 +128,7 @@ test('10 concurrent registrations enforce the permanent IP limit of 3', {
         await client.query('ROLLBACK').catch(() => {});
         throw error;
       } finally {
-        await client.end().catch(() => {});
+        await client.end();
       }
     });
 
@@ -176,18 +180,36 @@ test('10 concurrent registrations enforce the permanent IP limit of 3', {
     console.log('RACE CONDITION TEST: PASS');
   } finally {
     // Hanya menghapus data milik fingerprint acak tes ini.
-    await audit.query(
-      `DELETE FROM velzx_central_test.security_events
-       WHERE ip_fingerprint = $1`,
-      [fingerprint],
-    ).catch(() => {});
+    const cleanupErrors = [];
 
-    await audit.query(
-      `DELETE FROM velzx_central_test.registration_ip_claims
-       WHERE ip_fingerprint = $1`,
-      [fingerprint],
-    ).catch(() => {});
+    try {
+      await audit.query(
+        `DELETE FROM velzx_central_test.security_events
+         WHERE ip_fingerprint = $1`,
+        [fingerprint],
+      );
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
 
-    await audit.end().catch(() => {});
+    try {
+      await audit.query(
+        `DELETE FROM velzx_central_test.registration_ip_claims
+         WHERE ip_fingerprint = $1`,
+        [fingerprint],
+      );
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+
+    try {
+      await audit.end();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(cleanupErrors, 'Concurrency test cleanup gagal');
+    }
   }
 });

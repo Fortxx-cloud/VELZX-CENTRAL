@@ -226,3 +226,170 @@ test('fails closed when Central origin is unavailable', async () => {
 
   assert.equal(response.status, 502);
 });
+
+test('preserves multiple Set-Cookie response headers', async () => {
+  const response = await invokeWorker(
+    new Request('https://ingress.example/api/cookies', {
+      headers: { 'CF-Connecting-IP': CLIENT_IP },
+    }),
+    makeEnv(),
+    async () => {
+      const upstream = new Response('cookies', { status: 200 });
+      upstream.headers.append('Set-Cookie', 'session=alpha; Path=/; HttpOnly');
+      upstream.headers.append('Set-Cookie', 'csrf=beta; Path=/; Secure');
+      return upstream;
+    },
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.headers.getSetCookie(), [
+    'session=alpha; Path=/; HttpOnly',
+    'csrf=beta; Path=/; Secure',
+  ]);
+});
+
+test('forwards redirects without following them automatically', async () => {
+  for (const status of [301, 302, 307, 308]) {
+    let capturedInit;
+
+    const response = await invokeWorker(
+      new Request('https://ingress.example/api/redirect', {
+        headers: { 'CF-Connecting-IP': CLIENT_IP },
+      }),
+      makeEnv(),
+      async (_target, init) => {
+        capturedInit = init;
+        return new Response(null, {
+          status,
+          headers: { Location: 'https://central.example/login' },
+        });
+      },
+    );
+
+    assert.equal(response.status, status);
+    assert.equal(
+      response.headers.get('Location'),
+      'https://central.example/login',
+    );
+    assert.equal(capturedInit.redirect, 'manual');
+  }
+});
+
+test('preserves HTTP methods and binary request bodies', async () => {
+  const methods = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
+  const binaryBody = new Uint8Array([0, 255, 1, 128, 42]);
+
+  for (const method of methods) {
+    let capturedInit;
+
+    const request = new Request(
+      `https://ingress.example/api/method/${method.toLowerCase()}`,
+      {
+        method,
+        headers: { 'CF-Connecting-IP': CLIENT_IP },
+        ...(method !== 'GET' && method !== 'HEAD'
+          ? { body: binaryBody }
+          : {}),
+      },
+    );
+
+    const response = await invokeWorker(
+      request,
+      makeEnv(),
+      async (_target, init) => {
+        capturedInit = init;
+        return new Response(null, { status: 204 });
+      },
+    );
+
+    assert.equal(response.status, 204);
+    assert.equal(capturedInit.method, method);
+
+    if (method === 'GET' || method === 'HEAD') {
+      assert.equal(capturedInit.body, undefined);
+    } else {
+      assert.deepEqual(
+        new Uint8Array(capturedInit.body),
+        binaryBody,
+      );
+    }
+  }
+});
+
+test('preserves encoded path and query order in forwarding signature', async () => {
+  const url =
+    'https://ingress.example/api/%2Fencoded/%252e%252e/item?z=3&x=1';
+
+  const request = new Request(url, {
+    headers: { 'CF-Connecting-IP': CLIENT_IP },
+  });
+
+  const parsedUrl = new URL(request.url);
+  let capturedUrl;
+  let capturedInit;
+
+  const response = await invokeWorker(
+    request,
+    makeEnv(),
+    async (target, init) => {
+      capturedUrl = target;
+      capturedInit = init;
+      return new Response('ok');
+    },
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    capturedUrl,
+    `${ORIGIN}${parsedUrl.pathname}${parsedUrl.search}`,
+  );
+
+  const headers = new Headers(capturedInit.headers);
+  const timestamp = headers.get('X-Velzx-Timestamp');
+
+  assert.equal(
+    verifyIngressSignature({
+      secret: SECRET,
+      signature: headers.get('X-Velzx-Signature'),
+      method: 'GET',
+      pathname: parsedUrl.pathname,
+      search: parsedUrl.search,
+      timestamp,
+      nonce: headers.get('X-Velzx-Nonce'),
+      bodyHash: hashIngressBody(''),
+      clientIp: CLIENT_IP,
+      nowSeconds: Number(timestamp),
+    }),
+    true,
+  );
+});
+
+test('forwards the URL normalized by the request URL parser', async () => {
+  const request = new Request(
+    'https://ingress.example/api/a/../models?b=2&a=1',
+    {
+      headers: { 'CF-Connecting-IP': CLIENT_IP },
+    },
+  );
+
+  const parsedUrl = new URL(request.url);
+
+  assert.equal(parsedUrl.pathname, '/api/models');
+
+  let capturedUrl;
+
+  const response = await invokeWorker(
+    request,
+    makeEnv(),
+    async (target) => {
+      capturedUrl = target;
+      return new Response('ok');
+    },
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    capturedUrl,
+    `${ORIGIN}${parsedUrl.pathname}${parsedUrl.search}`,
+  );
+});

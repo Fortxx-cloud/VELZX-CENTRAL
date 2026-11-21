@@ -15,6 +15,7 @@ function parseUrl(value) {
     const url = new URL(value);
     return {
       host: url.hostname.toLowerCase(),
+      port: url.port || '5432',
       database: decodeURIComponent(url.pathname.replace(/^\/+/, '')),
       user: decodeURIComponent(url.username),
     };
@@ -34,9 +35,12 @@ function readEnv(key) {
 }
 
 function sameDatabase(a, b) {
-  return a.host === b.host &&
-    a.database === b.database &&
-    a.user === b.user;
+  const normalizeHost = (host) =>
+    host.toLowerCase().replace(/-pooler(?=\.|$)/, '');
+
+  return normalizeHost(a.host) === normalizeHost(b.host)
+    && a.port === b.port
+    && a.database === b.database;
 }
 
 function newFingerprint() {
@@ -44,7 +48,7 @@ function newFingerprint() {
 }
 
 async function connectTestDatabase() {
-  const connectionString = process.env.TEST_DATABASE_URL;
+  const connectionString = readEnv('TEST_DATABASE_URL');
 
   assert.ok(connectionString, 'TEST_DATABASE_URL belum diisi');
 
@@ -169,8 +173,11 @@ test('different IP fingerprints have independent account limits', {
     console.log('IP B CLAIMS:', countMap.get(ipB));
     console.log('DIFFERENT IP ISOLATION: PASS');
   } finally {
-    await cleanup(client, [ipA, ipB]);
-    await client.end();
+    try {
+      await cleanup(client, [ipA, ipB]);
+    } finally {
+      await client.end();
+    }
   }
 });
 
@@ -205,8 +212,11 @@ test('rollback leaves no registration IP claim', {
     console.log('CLAIMS AFTER ROLLBACK:', count.rows[0].total);
     console.log('ROLLBACK TEST: PASS');
   } finally {
-    await cleanup(client, [fingerprint]);
-    await client.end();
+    try {
+      await cleanup(client, [fingerprint]);
+    } finally {
+      await client.end();
+    }
   }
 });
 
@@ -267,7 +277,10 @@ test('security event persists after rejected transaction commits', {
     console.log('PERSISTED SECURITY EVENTS:', result.rows[0].events);
     console.log('SECURITY EVENT PERSISTENCE: PASS');
   } finally {
-    await cleanup(client, [fingerprint]);
-    await client.end();
+    try {
+      await cleanup(client, [fingerprint]);
+    } finally {
+      await client.end();
+    }
   }
 });
